@@ -1,0 +1,125 @@
+pipeline{
+    agent{
+        label "ubuntu"
+    }
+    environment{
+        VERSION = '1.3.0'
+        CREDENTIALS = credentials('democred')
+    }
+    parameters {
+      choice choices: ['DEV', 'UIT', 'PROD'], name: 'ENV_NAME'
+      string defaultValue: 'master', name: 'BRANCH_NAME'
+    }
+    options {
+      buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '30', numToKeepStr: '10')
+      timestamps()
+      disableConcurrentBuilds()
+    }
+    tools {
+      jdk 'java8'
+      git 'git'
+      maven 'maven'
+    }
+    stages{
+        stage("code_checkout"){
+            when {
+                expression{
+                    BRANCH_NAME == 'master' || ENV_NAME == 'DEV'
+                }
+            }
+            steps{
+                
+             git branch: '$BRANCH_NAME', credentialsId: 'github', url: 'https://github.com/prudhvireddy1/PetClinic.git'
+        
+            }
+            post{
+                always{
+                    echo "code checkout from github"
+                    echo "code version is ${VERSION}"
+                    echo "code credentials is ${CREDENTIALS}"
+                }
+                success{
+                    echo "======== executed successfully========"
+                }
+                failure{
+                    echo "======== execution failed========"
+                }
+            }
+        }
+    
+
+        stage("credentials"){
+            steps{
+               withCredentials([
+                   usernameColonPassword(
+                       credentialsId: 'democred', 
+                       variable: 'USERPASS')
+                       ]) {
+                           echo "credentials are ${USERPASS}"
+                       }
+
+            }
+        }
+        
+        stage('unit test & sonar scan'){
+            parallel {
+                stage('unit test') {
+                    steps{
+                    sh "mvn test"
+                    }
+                }
+                stage('SonarQube') {
+                     environment {
+                        SCANNER_HOME = tool 'sonarqube-scanner'
+                    }
+                    steps {
+                        withSonarQubeEnv( installationName: 'sonarqube-server') {
+                            sh "$SCANNER_HOME/bin/sonar-scanner -Dproject.settings=sonar-project.properties"
+                        }
+                    }
+                }
+
+            }
+        }
+
+        stage ('Package Code'){
+            steps {
+                sh "mvn package -Dmaven.test.skip=true"
+            }
+        }
+        
+        stage("Upload artifact to nexus"){
+          steps{
+               withCredentials([
+                   usernamePassword(
+                       credentialsId: 'democred', 
+                       usernameVariable: 'USER',
+                       passwordVariable: 'PASS')
+                ]) {
+                     sh '''
+                curl -u "$USER":"$PASS" POST "http://52.15.115.47:8081/service/rest/v1/components?repository=petclinic" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "maven2.groupId=org.springframework.samples" -F "maven2.artifactId=petclinic" -F "maven2.version=${BUILD_ID}.0.0" -F "maven2.asset1=@${WORKSPACE}/target/petclinic.war" -F "maven2.asset1.extension=war"
+                '''
+
+                       }  
+            }
+        }
+
+      stage('Deploy Code'){
+            steps {
+                ansiblePlaybook installation: 'ANSIBLE', playbook: '/opt/ansible-playbooks/deploy.yaml'
+            }
+        }
+
+    }       
+    post{
+        always{
+            echo "========pipeline for deployment========"
+        }
+        success{
+            echo "========pipeline executed successfully ========"
+        }
+        failure{
+            echo "========pipeline execution failed========"
+        }
+    }
+}
